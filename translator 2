@@ -1,0 +1,193 @@
+rom flask_sqlalchemy import SQLAlchemy
+from flask_login import UserMixin
+from werkzeug.security import generate_password_hash, check_password_hash
+
+db = SQLAlchemy()
+
+class User(UserMixin, db.Model):
+    __tablename__ = "users"
+
+    id            = db.Column(db.Integer, primary_key=True)
+    username      = db.Column(db.String(80), unique=True, nullable=False)
+    email         = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+    def __repr__(self):
+        return f"<User {self.username}>"
+
+from deep_translator import GoogleTranslator
+
+def translate_text(text: str, direction: str) -> dict:
+    """
+    Translate between Yoruba and English.
+    direction: 'yo-en' = Yoruba -> English
+               'en-yo' = English -> Yoruba
+    """
+    if not text or not text.strip():
+        return {"success": False, "error": "Input text cannot be empty."}
+
+    direction_map = {
+        "yo-en": {"source": "yo", "target": "en"},
+        "en-yo": {"source": "en", "target": "yo"},
+    }
+
+    if direction not in direction_map:
+        return {"success": False, "error": "Invalid translation direction."}
+
+    config = direction_map[direction]
+
+    try:
+        translator = GoogleTranslator(
+            source=config["source"],
+            target=config["target"]
+        )
+        result = translator.translate(text.strip())
+        return {"success": True, "result": result}
+
+    except Exception as e:
+        return {"success": False, "error": f"Translation failed: {str(e)}"}
+
+from flask import (
+    Flask, render_template, request,
+    redirect, url_for, flash, jsonify
+)
+from flask_login import (
+    LoginManager, login_user, logout_user,
+    login_required, current_user
+)
+from database import db, User
+from translator import translate_text
+
+# ── App Setup ──────────────────────────────────────────────────────────────────
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "adams-super-secret-key-change-in-production"
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///users.db"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+db.init_app(app)
+
+login_manager = LoginManager(app)
+login_manager.login_view = "login"
+login_manager.login_message = "Please log in or create an account to use Adams Translator."
+login_manager.login_message_category = "info"
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
+@app.route("/")
+def index():
+    if current_user.is_authenticated:
+        return redirect(url_for("translate"))
+    return redirect(url_for("register"))
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for("translate"))
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        email    = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        confirm  = request.form.get("confirm_password", "")
+
+        if not username or not email or not password:
+            flash("All fields are required.", "danger")
+            return render_template("register.html")
+
+        if password != confirm:
+            flash("Passwords do not match.", "danger")
+            return render_template("register.html")
+
+        if len(password) < 6:
+            flash("Password must be at least 6 characters.", "danger")
+            return render_template("register.html")
+
+        if User.query.filter_by(username=username).first():
+            flash("Username already taken.", "danger")
+            return render_template("register.html")
+
+        if User.query.filter_by(email=email).first():
+            flash("Email is already registered.", "danger")
+            return render_template("register.html")
+
+        new_user = User(username=username, email=email)
+        new_user.set_password(password)
+        db.session.add(new_user)
+        db.session.commit()
+
+        flash("Account created successfully! Please log in.", "success")
+        return redirect(url_for("login"))
+
+    return render_template("register.html")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("translate"))
+
+    if request.method == "POST":
+        email    = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        remember = request.form.get("remember") == "on"
+
+        user = User.query.filter_by(email=email).first()
+
+        if user and user.check_password(password):
+            login_user(user, remember=remember)
+            flash(f"Welcome back, {user.username}!", "success")
+            next_page = request.args.get("next")
+            return redirect(next_page or url_for("translate"))
+        else:
+            flash("Invalid email or password.", "danger")
+
+    return render_template("login.html")
+
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    flash("You have been logged out.", "info")
+    return redirect(url_for("login"))
+
+
+@app.route("/translate")
+@login_required
+def translate():
+    return render_template("translate.html", username=current_user.username)
+
+
+@app.route("/api/translate", methods=["POST"])
+@login_required
+def api_translate():
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"success": False, "error": "No data provided."}), 400
+
+    text      = data.get("text", "")
+    direction = data.get("direction", "yo-en")
+
+    result = translate_text(text, direction)
+    return jsonify(result)
+
+
+# ── Entry Point ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
+        print("Adams Translator is live at http://127.0.0.1:5000")
+    app.run(debug=True, port=5000)
